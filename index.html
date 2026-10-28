@@ -47,10 +47,17 @@ button, input, select { font: inherit; color: inherit; }
 fieldset { border: 1.5px solid var(--ink); margin: 0; padding: 14px; display: grid; gap: 10px; min-width: 0; }
 legend { padding: 0 6px; font-weight: 800; font-stretch: 80%; text-transform: uppercase; letter-spacing: .08em; font-size: 12px; }
 label { display: grid; gap: 3px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; min-width: 0; }
-input, select { width: 100%; min-width: 0; padding: 7px 8px; border: 1px solid var(--line); background: var(--paper); border-radius: 0; font-size: 14px; text-transform: none; letter-spacing: 0; }
-input:focus, select:focus { border-color: var(--ink); outline: none; box-shadow: 0 0 0 1px var(--ink); }
+input, select, textarea { width: 100%; min-width: 0; padding: 7px 8px; border: 1px solid var(--line); background: var(--paper); border-radius: 0; font-size: 14px; text-transform: none; letter-spacing: 0; }
+input:focus, select:focus, textarea:focus { border-color: var(--ink); outline: none; box-shadow: 0 0 0 1px var(--ink); }
 input[type=number], .mono { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+textarea { resize: vertical; min-height: 64px; line-height: 1.4; }
+.seg { display: flex; gap: 0; }
+.seg label { flex: 1; display: flex; gap: 6px; align-items: center; justify-content: center; border: 1px solid var(--line); padding: 5px 6px; cursor: pointer; font-size: 12px; text-transform: none; letter-spacing: 0; color: var(--muted); }
+.seg label + label { border-left: 0; }
+.seg label:has(input:checked) { border-color: var(--ink); background: var(--ink); color: var(--paper); }
+.seg input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.seg label:has(input:focus-visible) { outline: 2px solid var(--ink); outline-offset: 2px; }
 
 .item { border-top: 1px dashed var(--line); padding-top: 10px; display: grid; gap: 8px; }
 .item:first-of-type { border-top: 0; padding-top: 0; }
@@ -323,19 +330,44 @@ const int = (v, min = 0) => Math.max(min, parseInt(v, 10) || 0);
 
 /* ---------- roll numbers ---------- */
 // "10A01" -> prefix "10A", start 1, width 2. Rolls run start .. start+count-1, minus excluded ones.
+// A class can instead list its roll numbers one by one ("9103, 9107, 9120-9125").
 function parseRoll(s) {
   const m = String(s || '').trim().match(/^(.*?)(\d+)$/);
   if (!m) return { prefix: String(s || '').trim(), n: 1, width: 0 };
   return { prefix: m[1], n: parseInt(m[2], 10), width: m[2].length };
 }
+function rollKey(label) { return String(label).toUpperCase(); }
+function listRolls(c) {
+  const out = [], seen = new Set();
+  let repeated = 0;
+  const add = (label) => {
+    const k = rollKey(label);
+    if (seen.has(k)) { repeated++; return; }
+    seen.add(k);
+    const { prefix, n } = parseRoll(label);
+    out.push({ n, prefix, label });
+  };
+  String(c.list || '').split(/[\s,;]+/).filter(Boolean).forEach((t) => {
+    const m = t.match(/^(.+?)[-–](.+)$/);
+    const a = m && parseRoll(m[1]), b = m && parseRoll(m[2]);
+    // "9120-9125" or "10A05-10A09" expands to a run; anything else is one roll no
+    if (a && b && a.width && a.prefix === b.prefix && b.n >= a.n && b.n - a.n < 1000) {
+      for (let k = a.n; k <= b.n; k++) add(a.prefix + String(k).padStart(a.width, '0'));
+    } else add(t);
+  });
+  out.sort((x, y) => x.label.localeCompare(y.label, undefined, { numeric: true, sensitivity: 'base' }));
+  out.repeated = repeated;
+  return out;
+}
 function makeRolls(c) {
+  if (c.rollMode === 'list') return listRolls(c);
   const { prefix, n, width } = parseRoll(c.first);
   const skip = new Set(String(c.skip || '').split(/[\s,;]+/).filter(Boolean).map((t) => parseRoll(t).n));
   const out = [];
   for (let k = 0; k < int(c.count); k++) {
     const num = n + k;
     if (skip.has(num)) continue;
-    out.push({ n: num, label: prefix + String(num).padStart(width, '0') });
+    out.push({ n: num, prefix, label: prefix + String(num).padStart(width, '0') });
   }
   return out;
 }
@@ -345,7 +377,7 @@ function ranges(list) {
   let a = list[0], b = list[0];
   for (let i = 1; i <= list.length; i++) {
     const x = list[i];
-    if (x && x.n === b.n + 1) { b = x; continue; }
+    if (x && x.n === b.n + 1 && x.prefix === b.prefix) { b = x; continue; }
     parts.push(a === b ? a.label : `${a.label}–${b.label}`);
     a = b = x;
   }
@@ -500,10 +532,24 @@ function renderEditors() {
   }).join('');
 
   $('classList').innerHTML = state.classes.map((c, i) => {
-    const n = makeRolls(c);
+    const n = makeRolls(c), list = c.rollMode === 'list';
+    const seg = `<div class="seg" role="radiogroup" aria-label="Roll numbers of ${esc(c.name || 'class ' + (i + 1))}">
+        <label><input type="radio" name="cls-mode-${i}" data-f="rollMode" value="series"${list ? '' : ' checked'}>Roll nos in a series</label>
+        <label><input type="radio" name="cls-mode-${i}" data-f="rollMode" value="list"${list ? ' checked' : ''}>Type each roll no</label>
+      </div>`;
+    const head = `<div class="item-head">${swatch(i)}<strong>${esc(c.name || 'Class ' + (i + 1))}</strong>
+        <button type="button" class="icon-btn" data-del aria-label="Remove class ${i + 1}">✕</button></div>`;
+    if (list) return `<div class="item" data-kind="classes" data-i="${i}">
+      ${head}${seg}
+      <div class="two">
+        <label for="cls-name-${i}">Class<input id="cls-name-${i}" data-f="name" value="${esc(c.name)}"></label>
+        <label for="cls-group-${i}">Grade / paper<input id="cls-group-${i}" data-f="group" value="${esc(c.group || '')}" placeholder="${esc(autoGroup(c.name) || 'e.g. 10')}"></label>
+      </div>
+      <label for="cls-list-${i}">Roll numbers<textarea id="cls-list-${i}" class="mono" data-f="list" rows="3" placeholder="e.g. 12103, 12107, 12115-12120" spellcheck="false">${esc(c.list || '')}</textarea></label>
+      <div class="hint">${rollHint(n)}</div>
+    </div>`;
     return `<div class="item" data-kind="classes" data-i="${i}">
-      <div class="item-head">${swatch(i)}<strong>${esc(c.name || 'Class ' + (i + 1))}</strong>
-        <button type="button" class="icon-btn" data-del aria-label="Remove class ${i + 1}">✕</button></div>
+      ${head}${seg}
       <div class="item-grid">
         <label for="cls-name-${i}">Class<input id="cls-name-${i}" data-f="name" value="${esc(c.name)}"></label>
         <label for="cls-first-${i}">First roll no<input id="cls-first-${i}" class="mono" data-f="first" value="${esc(c.first)}"></label>
@@ -513,7 +559,7 @@ function renderEditors() {
         <label for="cls-group-${i}">Grade / paper<input id="cls-group-${i}" data-f="group" value="${esc(c.group || '')}" placeholder="${esc(autoGroup(c.name) || 'e.g. 10')}"></label>
         <label for="cls-skip-${i}">Leave out roll nos<input id="cls-skip-${i}" class="mono" data-f="skip" value="${esc(c.skip || '')}" placeholder="e.g. 10A07, 10A12"></label>
       </div>
-      <div class="hint">${n.length ? `${esc(n[0].label)} → ${esc(n[n.length - 1].label)} · ${n.length} to seat` : 'No students'}</div>
+      <div class="hint">${rollHint(n)}</div>
     </div>`;
   }).join('');
 
@@ -529,6 +575,12 @@ function renderEditors() {
   $('spreadText').textContent = seq
     ? 'Split the last two rooms evenly instead of leaving the last one nearly empty (e.g. 26 + 26)'
     : 'Share each class between rooms by room size';
+}
+
+function rollHint(n) {
+  if (!n.length) return 'No students';
+  const dup = n.repeated ? ` · ${n.repeated} repeated, counted once` : '';
+  return esc(`${n[0].label} → ${n[n.length - 1].label} · ${n.length} to seat${dup}`);
 }
 
 /* ---------- output ---------- */
@@ -681,7 +733,15 @@ $('controls').addEventListener('input', (e) => {
   const item = t.closest('.item');
   if (item) {
     const kind = item.dataset.kind, i = +item.dataset.i, f = t.dataset.f;
-    state[kind][i][f] = t.type === 'number' ? t.value : t.value;
+    if (f === 'rollMode') {
+      const c = state[kind][i];
+      // start the typed list from the series, so switching over keeps the same students
+      if (t.value === 'list' && !String(c.list || '').trim()) c.list = makeRolls(c).map((r) => r.label).join(', ');
+      c.rollMode = t.value;
+      save(); renderAll();
+      return;
+    }
+    state[kind][i][f] = t.value;
     // refresh the hint lines without rebuilding inputs (keeps focus)
     save(); renderPlan(); refreshHints();
     return;
@@ -717,7 +777,7 @@ function refreshHints() {
   });
   document.querySelectorAll('#classList .item').forEach((el) => {
     const c = state.classes[+el.dataset.i], n = makeRolls(c);
-    el.querySelector('.hint').textContent = n.length ? `${n[0].label} → ${n[n.length - 1].label} · ${n.length} to seat` : 'No students';
+    el.querySelector('.hint').innerHTML = rollHint(n);
     el.querySelector('.item-head strong').textContent = c.name || 'Class';
     el.querySelector('[data-f="group"]').placeholder = autoGroup(c.name) || 'e.g. 10';
   });
